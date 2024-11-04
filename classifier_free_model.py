@@ -2,9 +2,10 @@ import torch.nn as nn
 import torch
 from torch import Tensor
 import math
-from unet import Unet
+from unet_conditional import Unet
 from tqdm import tqdm
-from DiffusionClassifier import DiffusionClassifier
+import os, sys
+from LeNet5.model import LeNet
 
 
 class Diffuser(nn.Module):
@@ -16,12 +17,13 @@ class Diffuser(nn.Module):
         timesteps=1000,
         base_dim=32,
         dim_mults=[1, 2, 4, 8],
+        num_class=10,
     ):
         super().__init__()
         self.timesteps = timesteps
         self.in_channels = in_channels
         self.image_size = image_size
-        self.classifier = DiffusionClassifier()
+        self.num_class = num_class
 
         betas = self._cosine_variance_schedule(
             timesteps
@@ -39,26 +41,32 @@ class Diffuser(nn.Module):
         )
 
         self.model = Unet(
-            timesteps, time_embedding_dim, in_channels, in_channels, base_dim, dim_mults
+            timesteps,
+            time_embedding_dim,
+            num_class,
+            in_channels,
+            in_channels,
+            base_dim,
+            dim_mults,
         )
 
-    def forward(self, x, noise):
+    def forward(self, x, noise, y=None):
         # x:NCHW
         t = torch.randint(0, self.timesteps, (x.shape[0],)).to(x.device)
         x_t = self._forward_diffusion(x, t, noise)
-        pred_noise = self.model(x_t, t)
+        pred_noise = self.model(x_t, t, y)
 
         return pred_noise
 
     @torch.no_grad()
-    def sampling(self, n_samples: int, device="cuda") -> Tensor:
+    def sampling(self, n_samples: int, y, device="cuda") -> Tensor:
         x_t = torch.randn(
             (n_samples, self.in_channels, self.image_size, self.image_size)
         ).to(device)
         for i in range(self.timesteps - 1, -1, -1):
             noise = torch.randn_like(x_t).to(device)
             t = torch.tensor([i for _ in range(n_samples)]).to(device)
-            x_t = self._reverse_diffusion_with_clip(x_t, t, noise)
+            x_t = self._reverse_diffusion_with_clip(x_t, t, noise, y)
 
         x_t = (x_t + 1.0) / 2.0  # [-1,1] to [0,1]
 
@@ -109,7 +117,7 @@ class Diffuser(nn.Module):
 
     @torch.no_grad()
     def _reverse_diffusion_with_clip(
-        self, x_t: Tensor, t: Tensor, noise: Tensor
+        self, x_t: Tensor, t: Tensor, noise: Tensor, y
     ) -> Tensor:
         """
         reverse diffusion process with clipping

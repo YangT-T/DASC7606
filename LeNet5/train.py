@@ -1,4 +1,4 @@
-from model import Model
+from model import LeNet
 import numpy as np
 import os
 import torch
@@ -15,10 +15,10 @@ if __name__ == "__main__":
     test_dataset = mnist.MNIST(root="./test", train=False, transform=ToTensor())
     train_loader = DataLoader(train_dataset, batch_size=batch_size)
     test_loader = DataLoader(test_dataset, batch_size=batch_size)
-    model = Model().to(device)
+    model = LeNet().to(device)
     sgd = SGD(model.parameters(), lr=1e-1)
     loss_fn = CrossEntropyLoss()
-    all_epoch = 100
+    all_epoch = 1
     prev_acc = 0
     for current_epoch in range(all_epoch):
         model.train()
@@ -47,7 +47,7 @@ if __name__ == "__main__":
         print("accuracy: {:.3f}".format(acc), flush=True)
         if not os.path.isdir("models"):
             os.mkdir("models")
-        torch.save(model, "models/mnist_{:.3f}.pkl".format(acc))
+        torch.save(model, "models/mnist_classifier.ckp".format(acc))
         if np.abs(acc - prev_acc) < 1e-4:
             break
         prev_acc = acc

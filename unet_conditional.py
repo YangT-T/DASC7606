@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import random
 
 
 class ChannelShuffle(nn.Module):
@@ -113,8 +114,29 @@ class TimeMLP(nn.Module):
         return self.act(x)
 
 
+class LableMLP(nn.Module):
+    """
+    naive introduce timestep information to feature maps with mlp and add shortcut
+    """
+
+    def __init__(self, label_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(label_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+        self.act = nn.SiLU()
+
+    def forward(self, x, y):
+        y_emb = self.mlp(y).unsqueeze(-1).unsqueeze(-1)
+        x = x + y_emb
+
+        return self.act(x)
+
+
 class EncoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_embedding_dim):
+    def __init__(self, in_channels, out_channels, time_embedding_dim, label_dim):
         super().__init__()
         self.conv0 = nn.Sequential(
             *[ResidualBottleneck(in_channels, in_channels) for i in range(3)],
@@ -126,12 +148,18 @@ class EncoderBlock(nn.Module):
             hidden_dim=out_channels,
             out_dim=out_channels // 2,
         )
+        self.label_mlp = LableMLP(
+            label_dim=label_dim, hidden_dim=out_channels, out_dim=out_channels // 2
+        )
         self.conv1 = ResidualDownsample(out_channels // 2, out_channels)
 
-    def forward(self, x, t=None):
+    def forward(self, x, t=None, y=None, guidance_prob=0.1):
         x_shortcut = self.conv0(x)
         if t is not None:
             x = self.time_mlp(x_shortcut, t)
+        if y is not None and random.random() > guidance_prob:
+            x = self.label_mlp(x_shortcut, y)
+
         x = self.conv1(x)
 
         return [x, x_shortcut]
@@ -142,7 +170,7 @@ class DecoderBlock(nn.Module):
     Upsample process of UNet architecture
     """
 
-    def __init__(self, in_channels, out_channels, time_embedding_dim):
+    def __init__(self, in_channels, out_channels, time_embedding_dim, label_dim):
         super().__init__()
         # ---------- **** ---------- #
         # YOUR CODE HERE
@@ -161,13 +189,18 @@ class DecoderBlock(nn.Module):
             hidden_dim=out_channels * 2,
             out_dim=out_channels,
         )
+        self.label_mlp = LableMLP(
+            label_dim=label_dim,
+            hidden_dim=out_channels * 2,
+            out_dim=out_channels,
+        )
         self.conv1 = nn.Sequential(
             *[ResidualBottleneck(out_channels, out_channels) for i in range(3)],
             ResidualBottleneck(out_channels, out_channels // 2)
         )
         # ---------- **** ---------- #
 
-    def forward(self, x, x_shortcut, t=None):
+    def forward(self, x, x_shortcut, t=None, y=None, guidance_prob=0.1):
         # ---------- **** ---------- #
         # YOUR CODE HERE
         # Hint: you can refer to the EncoderBlock class and use nn.Upsample
@@ -176,6 +209,8 @@ class DecoderBlock(nn.Module):
         x = self.conv0(x)
         if t is not None:
             x = self.time_mlp(x, t)
+        if y is not None and random.random() > guidance_prob:
+            x = self.label_mlp(x_shortcut, y)
         x = self.conv1(x)
 
         # ---------- **** ---------- #
@@ -189,6 +224,7 @@ class Unet(nn.Module):
         self,
         timesteps,
         time_embedding_dim,
+        num_class,
         in_channels=3,
         out_channels=2,
         base_dim=32,
@@ -202,12 +238,16 @@ class Unet(nn.Module):
 
         self.init_conv = ConvBnSiLu(in_channels, base_dim, 3, 1, 1)
         self.time_embedding = nn.Embedding(timesteps, time_embedding_dim)
+        self.num_class = num_class
 
         self.encoder_blocks = nn.ModuleList(
-            [EncoderBlock(c[0], c[1], time_embedding_dim) for c in channels]
+            [EncoderBlock(c[0], c[1], time_embedding_dim, num_class) for c in channels]
         )
         self.decoder_blocks = nn.ModuleList(
-            [DecoderBlock(c[1], c[0], time_embedding_dim) for c in channels[::-1]]
+            [
+                DecoderBlock(c[1], c[0], time_embedding_dim, num_class)
+                for c in channels[::-1]
+            ]
         )
 
         self.mid_block = nn.Sequential(
@@ -219,7 +259,7 @@ class Unet(nn.Module):
             in_channels=channels[0][0] // 2, out_channels=out_channels, kernel_size=1
         )
 
-    def forward(self, x, t=None):
+    def forward(self, x, t=None, y=None):
         """
         Implement the data flow of the UNet architecture
         """
@@ -232,9 +272,14 @@ class Unet(nn.Module):
         else:
             t_ebd = None
 
+        if y is not None:
+            y_ebd = torch.tensor(nn.functional.one_hot(y, self.num_class)).float()
+        else:
+            y_ebd = None
+
         shortcuts = []
         for encoder in self.encoder_blocks:
-            output = encoder(x, t_ebd)
+            output = encoder(x, t_ebd, y_ebd)
             shortcuts.append(output[1])
             x = output[0]
             # print("x:{}, shortcut:{}".format(x.shape,output[1].shape))
@@ -242,7 +287,7 @@ class Unet(nn.Module):
         x = self.mid_block(x)
 
         for decoder, shrotcut in zip(self.decoder_blocks, reversed(shortcuts)):
-            x = decoder(x, shrotcut, t_ebd)
+            x = decoder(x, shrotcut, t_ebd, y_ebd)
 
         x = self.final_conv(x)
 
@@ -262,6 +307,8 @@ class Unet(nn.Module):
 if __name__ == "__main__":
     x = torch.randn(3, 3, 224, 224)
     t = torch.randint(0, 1000, (3,))
-    model = Unet(1000, 128)
-    y = model(x, t)
+    # label = torch.randint(0, 9, (1,))
+    label = None
+    model = Unet(1000, 128, 10)
+    y = model(x, t, label)
     print(y.shape)

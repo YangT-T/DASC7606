@@ -1,10 +1,11 @@
+import torch
 from torch.nn import Module
 from torch import nn
 
 
-class Model(Module):
+class LeNet(Module):
     def __init__(self):
-        super(Model, self).__init__()
+        super(LeNet, self).__init__()
         self.conv1 = nn.Conv2d(1, 6, 5)
         self.relu1 = nn.ReLU()
         self.pool1 = nn.MaxPool2d(2)
@@ -33,3 +34,12 @@ class Model(Module):
         y = self.fc3(y)
         y = self.relu5(y)
         return y
+
+    def get_guidance(self, y, x):
+        criteria = torch.nn.CrossEntropyLoss()
+        x.requires_grad = True
+        x.zero_grad()
+        output = self.forward(x)
+        loss = criteria(y, nn.functional.softmax(output))
+        loss.backward()
+        return x.grad
